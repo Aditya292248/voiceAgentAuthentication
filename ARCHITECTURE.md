@@ -10,24 +10,49 @@ not the agent ever says. If the agent later claims to represent someone else, a 
 message warns them. Every step that fails, times out or is ambiguous ends in `UNVERIFIED`
 ([ADR 0002](docs/adr/0002-fail-closed.md)).
 
-So far there is config, logging, a health endpoint, the verdict state machine and claim
-extraction. Nothing feeds the state machine real events yet.
+So far there is config, logging, a health endpoint, the verdict state machine, claim
+extraction, the AgentPhone client and call lookup. Nothing feeds the state machine real
+events yet.
 
 ## Code map
 
-| Path             | Role                                                                     |
-| ---------------- | ------------------------------------------------------------------------ |
-| `src/claim.ts`   | `extractClaims(text, registry)`: which known names an agent turn claims. |
-| `src/config.ts`  | Parses and validates the environment. The only reader of `process.env`.  |
-| `src/log.ts`     | One-line JSON event log, keyed by call ID.                               |
-| `src/server.ts`  | Entry point. `node:http` server; `GET /health` only for now.             |
-| `src/types.ts`   | Lookup results, claims, verdict states, events and reason codes.         |
-| `src/verdict.ts` | `nextVerdict(prev, event, aliases)`: the pure verdict state machine.     |
-| `test/`          | `node:test` suites, run through `tsx`.                                   |
-| `docs/adr/`      | Decision records.                                                        |
+| Path                | Role                                                                          |
+| ------------------- | ----------------------------------------------------------------------------- |
+| `src/agentphone.ts` | AgentPhone HTTP client: auth, timeout, typed errors, zod validation.          |
+| `src/claim.ts`      | `extractClaims(text, registry)`: which known names an agent turn claims.      |
+| `src/config.ts`     | Parses and validates the environment. The only reader of `process.env`.       |
+| `src/log.ts`        | One-line JSON event log, keyed by call ID.                                    |
+| `src/lookup.ts`     | `lookupCall`: the one live call to `MY_NUMBER` and the sub-account owning it. |
+| `src/server.ts`     | Entry point. `node:http` server; `GET /health` only for now.                  |
+| `src/types.ts`      | Lookup results, claims, verdict states, events and reason codes.              |
+| `src/verdict.ts`    | `nextVerdict(prev, event, aliases)`: the pure verdict state machine.          |
+| `test/`             | `node:test` suites, run through `tsx`.                                        |
+| `test/fixtures/`    | Redacted responses recorded from the live API. Numbers are `+1555…`.          |
+| `docs/adr/`         | Decision records.                                                             |
 
-Planned: the AgentPhone client, call lookup, transcript stream, token signing and the
-notifier, each in its own module under `src/`.
+Planned: the transcript stream, the orchestrator, token signing and the notifier, each in its
+own module under `src/`.
+
+## Call lookup
+
+`lookupCall(client, options, now)` makes one pass and returns the `LookupResult` that
+`nextVerdict` consumes. The owner is the sub-account whose scoped query returned the call,
+named from `SUB_ACCOUNTS`. Nothing the caller chooses, such as the agent's name, is read.
+
+1. For every configured sub-account, list calls with status `ringing` and with status
+   `in-progress` (`search=MY_NUMBER`, every page), in parallel. `ringing` is not in the API
+   documentation but is real: before pickup it is the only status that lists the call.
+2. Keep outbound calls to `MY_NUMBER` that started at most 60 s ago and whose status is the
+   one asked for.
+3. Count ringing and in-progress candidates together. Exactly one is `one`; none is `none`;
+   more is `ambiguous` ([ADR 0004](docs/adr/0004-call-matching.md)). The same call in both
+   status queries of one sub-account counts once; under two sub-accounts it is ambiguous.
+
+Errors: a non-2xx status, a body that is not JSON (a 502 arrives as plain text), a response
+that fails zod validation, a timeout (3 s per request) or more than 10 pages all give
+`api_error`. A 429 is thrown as `RateLimited`; `lookupWithRetry` waits for `Retry-After`
+(2 s if missing, at most 10 s) and gives up with `lookup_timeout` at its deadline. The client
+takes `fetch` as a parameter, so the tests replay the recorded fixtures without a network.
 
 ## Claim extraction
 
@@ -106,6 +131,9 @@ message is a proof-page link printed to the terminal; SMS or iMessage comes late
   never raise one.
 - The verdict for a call never moves from `MISMATCH` or `UNVERIFIED` back to `VERIFIED`.
 - A claim's principal is always an entry from the registry, never text taken from the call.
+- A call's owner comes only from which sub-account's query returned it, never from
+  `agentName` or any other field the caller sets.
+- `src/agentphone.ts` is the only module that talks to the AgentPhone API.
 - `src/verdict.ts` and `src/claim.ts` do no I/O, and `verdict.ts` reads no clock. Timers live in the caller and arrive as
   deadline events.
 

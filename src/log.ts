@@ -19,6 +19,11 @@ export function _logServerStarted(port: number, version: string): void {
   logEvent(null, 'server_started', { port, version });
 }
 
+/** `status` is "ringing" or "in-progress": shows whether the owner was known before pickup. */
+export function _logCallMatched(callId: string, ownerSub: string, status: string): void {
+  logEvent(callId, 'call_matched', { ownerSub, status });
+}
+
 export function _logRequest(method: string, path: string, status: number): void {
   logEvent(null, 'http_request', { method, path, status });
 }
