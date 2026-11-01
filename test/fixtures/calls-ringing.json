@@ -1,0 +1,24 @@
+{
+  "data": [
+    {
+      "id": "call_alex_1",
+      "agentId": "agent_alex",
+      "agentName": "Alex's agent",
+      "phoneNumberId": "pn_alex",
+      "phoneNumber": "+15550000001",
+      "fromNumber": "+15550000001",
+      "toNumber": "+15550000002",
+      "direction": "outbound",
+      "status": "ringing",
+      "startedAt": "2026-11-01T11:04:48.425000Z",
+      "endedAt": null,
+      "durationSeconds": null,
+      "recordingAvailable": false,
+      "recordingUrl": null,
+      "failureReason": null,
+      "transcripts": []
+    }
+  ],
+  "hasMore": false,
+  "total": 1
+}
