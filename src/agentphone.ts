@@ -75,6 +75,10 @@ export function createClient(options: ClientOptions): AgentPhoneClient {
   async function getJson<T>(path: string, subAccountId: string, schema: z.ZodType<T>): Promise<T> {
     let response: Response;
     let text: string;
+    // A plain setTimeout, not AbortSignal.timeout: that timer is unref'd, so with nothing
+    // else pending Node can exit before it fires and the request never fails.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       response = await fetchFn(`${base}${path}`, {
         headers: {
@@ -83,14 +87,14 @@ export function createClient(options: ClientOptions): AgentPhoneClient {
           Accept: 'application/json',
         },
         // Also covers reading the body, not only waiting for the headers.
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: controller.signal,
       });
       text = await response.text();
-    } catch (err) {
-      if (err instanceof Error && err.name === 'TimeoutError') {
-        throw new Timeout(`no response within ${timeoutMs} ms`);
-      }
+    } catch {
+      if (controller.signal.aborted) throw new Timeout(`no response within ${timeoutMs} ms`);
       throw new ApiError(null, 'request failed before a response arrived');
+    } finally {
+      clearTimeout(timer);
     }
 
     const { status } = response;
