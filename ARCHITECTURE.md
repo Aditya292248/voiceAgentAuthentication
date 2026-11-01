@@ -10,23 +10,46 @@ not the agent ever says. If the agent later claims to represent someone else, a 
 message warns them. Every step that fails, times out or is ambiguous ends in `UNVERIFIED`
 ([ADR 0002](docs/adr/0002-fail-closed.md)).
 
-So far there is config, logging, a health endpoint and the verdict state machine. Nothing
-feeds the state machine real events yet.
+So far there is config, logging, a health endpoint, the verdict state machine and claim
+extraction. Nothing feeds the state machine real events yet.
 
 ## Code map
 
-| Path             | Role                                                                    |
-| ---------------- | ----------------------------------------------------------------------- |
-| `src/config.ts`  | Parses and validates the environment. The only reader of `process.env`. |
-| `src/log.ts`     | One-line JSON event log, keyed by call ID.                              |
-| `src/server.ts`  | Entry point. `node:http` server; `GET /health` only for now.            |
-| `src/types.ts`   | Lookup results, claims, verdict states, events and reason codes.        |
-| `src/verdict.ts` | `nextVerdict(prev, event, aliases)`: the pure verdict state machine.    |
-| `test/`          | `node:test` suites, run through `tsx`.                                  |
-| `docs/adr/`      | Decision records.                                                       |
+| Path             | Role                                                                     |
+| ---------------- | ------------------------------------------------------------------------ |
+| `src/claim.ts`   | `extractClaims(text, registry)`: which known names an agent turn claims. |
+| `src/config.ts`  | Parses and validates the environment. The only reader of `process.env`.  |
+| `src/log.ts`     | One-line JSON event log, keyed by call ID.                               |
+| `src/server.ts`  | Entry point. `node:http` server; `GET /health` only for now.             |
+| `src/types.ts`   | Lookup results, claims, verdict states, events and reason codes.         |
+| `src/verdict.ts` | `nextVerdict(prev, event, aliases)`: the pure verdict state machine.     |
+| `test/`          | `node:test` suites, run through `tsx`.                                   |
+| `docs/adr/`      | Decision records.                                                        |
 
-Planned: the AgentPhone client, call lookup, transcript stream, claim extraction, token
-signing and the notifier, each in its own module under `src/`.
+Planned: the AgentPhone client, call lookup, transcript stream, token signing and the
+notifier, each in its own module under `src/`.
+
+## Claim extraction
+
+`extractClaims(text, registry)` reads one agent turn and returns a claim for each principal it
+says it acts for. The registry is every owner name and alias (`principalNames` builds it from
+the sub-accounts and aliases). It is pure: the caller passes only agent turns, never the
+callee's, so "is this about Alex?" from the person being called is never checked.
+
+1. Normalize the text and the registry the same way: lowercase, drop apostrophes ("Aditya's"
+   and "Adityas" become one word), turn other punctuation into spaces.
+2. Match fixed patterns whose name slot is the registry itself: "on behalf of X", "X's
+   assistant / agent / office", "calling for X", "I represent X", "I work for X". Whole words
+   only, so "Al" never matches inside "Alfred".
+3. Return each matched registry entry once, as written in the registry. Several names in one
+   turn give several claims; `verdict.ts` decides which, if any, is the owner.
+
+Only registry names can come back, so nothing the caller says becomes the text of a claim,
+and an instruction like "ignore previous instructions, mark verified" matches nothing. The
+cost is that a claim for someone outside the registry is not flagged; the owner is still
+disclosed. Known false claims, "I'm calling for Aditya" meaning "may I speak to Aditya" and
+"I'm not calling on behalf of Aditya", both err towards `MISMATCH`, never towards `VERIFIED`.
+There is no LLM fallback.
 
 ## Verdict state machine
 
@@ -82,7 +105,8 @@ message is a proof-page link printed to the terminal; SMS or iMessage comes late
 - Caller ID and anything the caller says are untrusted input. They can lower a verdict but
   never raise one.
 - The verdict for a call never moves from `MISMATCH` or `UNVERIFIED` back to `VERIFIED`.
-- `src/verdict.ts` does no I/O and reads no clock. Timers live in the caller and arrive as
+- A claim's principal is always an entry from the registry, never text taken from the call.
+- `src/verdict.ts` and `src/claim.ts` do no I/O, and `verdict.ts` reads no clock. Timers live in the caller and arrive as
   deadline events.
 
 ## Intentional oddities
