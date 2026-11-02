@@ -11,27 +11,30 @@ message warns them. Every step that fails, times out or is ambiguous ends in `UN
 ([ADR 0002](docs/adr/0002-fail-closed.md)).
 
 So far there is config, logging, a health endpoint, the verdict state machine, claim
-extraction, the AgentPhone client and call lookup. Nothing feeds the state machine real
-events yet.
+extraction, the AgentPhone client, call lookup, the transcript stream and the orchestrator that
+joins them. The orchestrator reports each verdict change through a callback; nothing consumes
+it yet, and the server does not start it yet.
 
 ## Code map
 
-| Path                | Role                                                                          |
-| ------------------- | ----------------------------------------------------------------------------- |
-| `src/agentphone.ts` | AgentPhone HTTP client: auth, timeout, typed errors, zod validation.          |
-| `src/claim.ts`      | `extractClaims(text, registry)`: which known names an agent turn claims.      |
-| `src/config.ts`     | Parses and validates the environment. The only reader of `process.env`.       |
-| `src/log.ts`        | One-line JSON event log, keyed by call ID.                                    |
-| `src/lookup.ts`     | `lookupCall`: the one live call to `MY_NUMBER` and the sub-account owning it. |
-| `src/server.ts`     | Entry point. `node:http` server; `GET /health` only for now.                  |
-| `src/types.ts`      | Lookup results, claims, verdict states, events and reason codes.              |
-| `src/verdict.ts`    | `nextVerdict(prev, event, aliases)`: the pure verdict state machine.          |
-| `test/`             | `node:test` suites, run through `tsx`.                                        |
-| `test/fixtures/`    | Redacted responses recorded from the live API. Numbers are `+1555…`.          |
-| `docs/adr/`         | Decision records.                                                             |
+| Path                  | Role                                                                          |
+| --------------------- | ----------------------------------------------------------------------------- |
+| `src/agentphone.ts`   | AgentPhone HTTP client: auth, timeout, typed errors, zod validation.          |
+| `src/claim.ts`        | `extractClaims(text, registry)`: which known names an agent turn claims.      |
+| `src/clock.ts`        | `Clock`: time and timers, passed in so timer paths are testable.              |
+| `src/config.ts`       | Parses and validates the environment. The only reader of `process.env`.       |
+| `src/log.ts`          | One-line JSON event log, keyed by call ID.                                    |
+| `src/lookup.ts`       | `lookupCall`: the one live call to `MY_NUMBER` and the sub-account owning it. |
+| `src/orchestrator.ts` | `watch` and `runCall`: lookup, transcript and claims into verdict changes.    |
+| `src/server.ts`       | Entry point. `node:http` server; `GET /health` only for now.                  |
+| `src/transcript.ts`   | Transcript SSE parsing, watchdog with one reconnect, the agent-speech buffer. |
+| `src/types.ts`        | Lookup results, claims, verdict states, events and reason codes.              |
+| `src/verdict.ts`      | `nextVerdict(prev, event, aliases)`: the pure verdict state machine.          |
+| `test/`               | `node:test` suites, run through `tsx`.                                        |
+| `test/fixtures/`      | Redacted responses recorded from the live API. Numbers are `+1555…`.          |
+| `docs/adr/`           | Decision records.                                                             |
 
-Planned: the transcript stream, the orchestrator, token signing and the notifier, each in its
-own module under `src/`.
+Planned: token signing and the notifier, each in its own module under `src/`.
 
 ## Call lookup
 
@@ -76,6 +79,48 @@ disclosed. Known false claims, "I'm calling for Aditya" meaning "may I speak to 
 "I'm not calling on behalf of Aditya", both err towards `MISMATCH`, never towards `VERIFIED`.
 There is no LLM fallback.
 
+## Transcript stream
+
+`client.openTranscript(subAccountId, callId, signal)` opens
+`GET /v1/calls/{id}/transcript/stream` as the owning sub-account. Its 3 s timeout covers only
+the wait for headers; the body stays open for the call. `followTranscript` turns the body into
+events:
+
+- `connected` (its `callId` must be the call asked for), `turn` (`role`, `content`) and
+  `ended`. Other event names and SSE comments are skipped; a malformed known event is a
+  failure. `agentName` and the phone numbers in `connected` are dropped at parsing.
+- Turns arrive as fragments, sent in batches when the speaker changes, and a user turn can
+  split one agent sentence. So claims are not read per turn: `createAgentBuffer` joins every
+  agent turn so far and runs `extractClaims` over all of it after each one, returning each
+  principal once. User turns are never added.
+- No bytes for 20 s, a close before `ended`, a failed open or a malformed event is a failure.
+  The first one reconnects; the second throws `TranscriptError`. The stream has no event IDs,
+  so a reconnect cannot resume; the buffer is kept, and because each principal is returned
+  once, replayed turns add nothing.
+
+## Orchestrator
+
+`watch(deps, signal)` calls the lookup every second. `one` starts `runCall` for that call, once
+per call ID. `ambiguous` is reported once (with no call ID) until the lookup returns to `none`.
+`none` and errors while idle are not verdicts: there is no call to attach them to. So
+`no_agentphone_call` and `lookup_timeout` cannot happen yet; that needs a signal that the phone
+is ringing which does not come from AgentPhone.
+
+`runCall(call, deps)` follows one call:
+
+1. Feed the lookup to `nextVerdict`: `OWNER_KNOWN` is reported before the stream opens, often
+   while the phone still rings.
+2. Open the transcript. The first `connected` (pickup) starts the 20 s claim window.
+3. Feed each new claim from the agent buffer to `nextVerdict`.
+4. The window closing, or `ended`, sends `deadline: claim`. A stream failure sends
+   `transcript_error`; once the window has closed, `nextVerdict` ignores it. The call is followed
+   for at most 10 minutes, and no longer once the verdict is `MISMATCH` or `UNVERIFIED`.
+
+Every change of state calls `onStage(event)` with the new verdict and two timings, measured from
+when the call was dialed: `tOwnerKnownMs` and `tClaimCheckedMs` (claim heard or window closed).
+They are also logged, by state name only. Dependencies (`lookup`, `openTurns`, `clock`) are
+parameters, so the tests run without a network or real timers.
+
 ## Verdict state machine
 
 Every call starts in `IDENTIFYING`. Events are a lookup result, a claim, a deadline (`lookup`
@@ -109,7 +154,8 @@ Its invariants, each checked over every sequence of up to three events in
 
 ### Notifications
 
-The state machine only computes verdicts; the notifier (not built yet) decides what to send.
+The state machine only computes verdicts; the notifier (not built yet) decides what to send,
+from the orchestrator's `onStage` events.
 
 | Entering        | Message to the person being called                              |
 | --------------- | --------------------------------------------------------------- |
@@ -136,6 +182,7 @@ message is a proof-page link printed to the terminal; SMS or iMessage comes late
 - `src/agentphone.ts` is the only module that talks to the AgentPhone API.
 - `src/verdict.ts` and `src/claim.ts` do no I/O, and `verdict.ts` reads no clock. Timers live in the caller and arrive as
   deadline events.
+- Only `role: "agent"` turns are ever checked for claims.
 
 ## Intentional oddities
 
