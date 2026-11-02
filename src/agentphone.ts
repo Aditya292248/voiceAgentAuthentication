@@ -57,6 +57,12 @@ export class Timeout extends Error {
 export type AgentPhoneClient = {
   /** One page of `GET /v1/calls`, scoped to one sub-account. */
   listCalls(subAccountId: string, query: CallsQuery): Promise<CallsPage>;
+  /** The raw SSE body of `GET /v1/calls/{id}/transcript/stream`. Aborting `signal` closes it. */
+  openTranscript(
+    subAccountId: string,
+    callId: string,
+    signal: AbortSignal,
+  ): Promise<AsyncIterable<Uint8Array>>;
 };
 
 export type ClientOptions = {
@@ -81,11 +87,7 @@ export function createClient(options: ClientOptions): AgentPhoneClient {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       response = await fetchFn(`${base}${path}`, {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'X-Sub-Account-Id': subAccountId,
-          Accept: 'application/json',
-        },
+        headers: headers(subAccountId, 'application/json'),
         // Also covers reading the body, not only waiting for the headers.
         signal: controller.signal,
       });
@@ -108,6 +110,10 @@ export function createClient(options: ClientOptions): AgentPhoneClient {
     return parsed.data;
   }
 
+  function headers(subAccountId: string, accept: string): Record<string, string> {
+    return { Authorization: `Bearer ${apiKey}`, 'X-Sub-Account-Id': subAccountId, Accept: accept };
+  }
+
   return {
     listCalls(subAccountId, query) {
       const params = new URLSearchParams({
@@ -117,6 +123,40 @@ export function createClient(options: ClientOptions): AgentPhoneClient {
         offset: String(query.offset),
       });
       return getJson(`/v1/calls?${params}`, subAccountId, CallsPageSchema);
+    },
+
+    // The timeout covers only the wait for headers: the body stays open for the whole call, and
+    // spotting a silent stream is the transcript watchdog's job.
+    async openTranscript(subAccountId, callId, signal) {
+      const controller = new AbortController();
+      const stop = () => controller.abort();
+      if (signal.aborted) stop();
+      signal.addEventListener('abort', stop, { once: true });
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        stop();
+      }, timeoutMs);
+      let response: Response;
+      try {
+        response = await fetchFn(
+          `${base}/v1/calls/${encodeURIComponent(callId)}/transcript/stream`,
+          {
+            headers: headers(subAccountId, 'text/event-stream'),
+            signal: controller.signal,
+          },
+        );
+      } catch {
+        if (timedOut) throw new Timeout(`no response within ${timeoutMs} ms`);
+        throw new ApiError(null, 'request failed before a response arrived');
+      } finally {
+        clearTimeout(timer);
+      }
+      if (!response.ok || response.body === null) {
+        await response.body?.cancel();
+        throw new ApiError(response.status, `transcript stream returned ${response.status}`);
+      }
+      return response.body;
     },
   };
 }

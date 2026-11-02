@@ -1,0 +1,30 @@
+event: connected
+data: {"callId": "call_alex_1", "status": "in-progress", "agentId": "agent_alex", "agentName": "Alex's agent", "direction": "outbound", "fromNumber": "+15550000001", "toNumber": "+15550000002", "startedAt": "2026-11-01T11:04:48.425000Z"}
+
+event: turn
+data: {"role": "agent", "content": "Hi, I'm an AI assistant calling on behalf of Aditya. He needs ", "createdAt": "2026-11-01T11:05:00.468947Z"}
+
+event: turn
+data: {"role": "user", "content": "Who are the ", "createdAt": "2026-11-01T11:05:00.468990Z"}
+
+event: turn
+data: {"role": "agent", "content": "last month's ", "createdAt": "2026-11-01T11:05:00.468997Z"}
+
+event: turn
+data: {"role": "user", "content": "other there? ", "createdAt": "2026-11-01T11:05:01.217115Z"}
+
+event: turn
+data: {"role": "agent", "content": "I can’t share personal details. This was just a quick request for last month’s statement to be ", "createdAt": "2026-11-01T11:05:09.933025Z"}
+
+event: turn
+data: {"role": "user", "content": "Okay. ", "createdAt": "2026-11-01T11:05:09.933051Z"}
+
+event: turn
+data: {"role": "agent", "content": "emailed today. Thanks for your ", "createdAt": "2026-11-01T11:05:09.933056Z"}
+
+event: turn
+data: {"role": "user", "content": "Okay. ", "createdAt": "2026-11-01T11:05:09.933059Z"}
+
+event: ended
+data: {"callId": "call_alex_1", "status": "completed", "endedAt": "2026-11-01T11:05:12.491000Z", "durationSeconds": 24}
+
